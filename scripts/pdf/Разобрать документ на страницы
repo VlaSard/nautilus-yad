@@ -1,0 +1,90 @@
+#!/bin/bash
+#  -*- mode: sh -*-
+#
+# ОПИСАНИЕ: Разбирает pdf документ на отдельные страницы.
+#
+# ЗАВИСИТ: yad 12.3 (GTK+ 3.24.36)
+#          qpdf version 11.2.0
+#          pdfinfo version 23.02.0
+
+# Переменные по умолчанию.
+SCRIPT_NAME='BurstPDF'
+TITLE_DIALOG=${0##*/}
+SCRIPT_DIR=${0%/*}
+ICON_DIR=$(readlink -e "$SCRIPT_DIR"/../../icons)
+ICONS=$ICON_DIR/menu-photos.svg
+
+# Общие настройки YAD.
+export YAD_OPTIONS="--window-icon $ICONS --name $SCRIPT_NAME"
+
+# Список файлов на входе.
+file_list_in=("$@")
+
+# Вывод уведомлений.
+notifyDialog() {
+  yad --geometry 100x50-10+50 --no-buttons --undecorated --skip-taskbar \
+    --close-on-unfocus --timeout 5 \
+    --text "\n$TEXT_DIALOG\n" --text-align center --text-width 30
+}
+
+# Если выбрали более одного файла, вывести ошибку.
+[[ ${#file_list_in[@]} -ne 1 ]] &&
+  {
+    TEXT_DIALOG='Выберите только один файл.'
+    notifyDialog
+    exit 1
+  }
+
+# Псевдоним файла, переданного на обработку.
+file_name_in=${file_list_in[0]}
+
+# Проверить что это pdf файл
+mime_type=$(file --mime-type "$file_name_in" | awk -F ": " '{print $2}')
+[[ "$mime_type" != 'application/pdf' ]] &&
+  {
+    TEXT_DIALOG='Для извлечения страниц, выберите документ в формате pdf.'
+    notifyDialog
+    exit 1
+  }
+
+# Выбрать директорию для сохранения извлеченных страниц.
+BURST_DIR=$(
+  yad \
+    --geometry 900x600+200+100 --title "$TITLE_DIALOG" \
+    --text 'Выберите директорию для извлечения страниц...' \
+    --file --directory --mime-filter 'dir | inode/directory' \
+    --file-filter 'all | *' --button 'Отмена':1 --button 'Ок':0
+)
+res_code=$?
+[[ $res_code -ne 0 ]] && exit
+
+# Получить число страниц в документе.
+j=$(pdfinfo "$file_name_in" | grep -E '^Pages:' | awk -F ': *' '{print $2}')
+
+# Установить счетчик текущей страницы в 0
+i=0
+
+# Извлечь все страницы.
+while [ $i -ne $j ]; do
+
+  ((i++))
+
+  # Получить номер страницы в формате 000N.
+  printf -v page_num "%0${#j}d" "$i"
+
+  # Получить имя файла для сохранения.
+  file_name_out=pg_$page_num.pdf
+
+  # Извлечь страницу $i.
+  qpdf --empty --pages "$file_name_in" "$i" -- "$BURST_DIR/$file_name_out"
+
+  # Вывести отчет.
+  echo "#Страница $i из $j сохранена в файл $file_name_out"
+  echo $((i * 100 / j))
+
+done |
+  yad --geometry 400x40-10+50 --undecorated --no-escape --no-buttons \
+    --skip-taskbar --progress --auto-close
+
+TEXT_DIALOG='Извлечение страниц завершено.'
+notifyDialog
