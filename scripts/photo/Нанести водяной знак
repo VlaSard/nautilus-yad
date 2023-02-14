@@ -1,0 +1,127 @@
+#!/bin/bash
+#
+# ОПИСАНИЕ: Наложить водяной знак на изображения, выбранные в Nautilus.
+#
+# ЗАВИСИТ:  yad 12.3 (GTK+ 3.24.36)
+#           ImageMagick 7.1.0-57 (Beta) Q16-HDRI x86_64 20701
+
+# Передача параметра из дочки
+COPYDIR=$(mktemp /tmp/$$-XXXXXXXX)
+trap 'rm -f "$COPYDIR"' EXIT
+
+# Переменные по умолчанию
+SCRIPT_NAME='WaterMarkImg'
+TITLE_DIALOG=$(basename "$0")
+SCRIPT_DIR=$(dirname "$0")
+ICON_DIR=$(readlink -e "$SCRIPT_DIR"/../../icons)
+ICONS=$ICON_DIR/menu-photos.svg
+WORKDIR=$(pwd -P)
+
+export COPYDIR WORKDIR TITLE_DIALOG
+
+# Общие настройки YAD
+export YAD_OPTIONS="--window-icon $ICONS --name $SCRIPT_NAME --use-interp"
+
+# Список файлов на входе
+file_list_in=("$@")
+
+# Вывод уведомлений
+notifyDialog() {
+  yad --geometry 100x50-10+50 --no-buttons --undecorated --skip-taskbar \
+    --close-on-unfocus --timeout 5 \
+    --text "\n$TEXT_DIALOG\n" --text-align center --text-width 30
+}
+
+# Выбор директории для сохранения
+copySave() {
+  if [ "$1" == 5 ] && [ "$2" == "TRUE" ]; then
+    copy_path_new=$(yad --geometry 800x500+50+50 --title "$TITLE_DIALOG" \
+      --text 'Выберите директорию для сохранения...' \
+      --button 'Отмена':1 --button 'Ок':0\
+      --file --directory --filename "$WORKDIR/" --save)
+    echo "${copy_path_new:-$WORKDIR/tagged}" >"$COPYDIR"
+  fi
+}; export -f copySave
+
+# получить значение десятичной точки в текущей локали
+eval "$(locale -ck LC_NUMERIC | grep decimal_point)"
+
+# Переменные меню
+POSITION='Top Left!Top Right!Bottom Left!^Bottom Right!Top!Bottom!Left!Right!Center!Tiled'
+# POSITION='Вверху слева!Вверху справа!^Внизу слева!Внизу справа!Вверху!Внизу!Слева!Справа!По центру!Плитка'
+WATERFILE=''
+TRANSPARENCY='10!0..100!1'
+
+while :; do
+
+  CHOICES=$(
+    yad --geometry 500x200+50+50 --image "$ICONS" --title "$TITLE_DIALOG" \
+      --text '\tПараметры водяного знака' --button 'Отмена':1 --button 'Ок':0 \
+      --form \
+      --field 'Изображение':FL "$WATERFILE" \
+      --field 'Положение':CB "$POSITION" \
+      --field 'Прозрачность %':NUM "$TRANSPARENCY" \
+      --field '':LBL '' \
+      --field 'Создавать копии':CHK "FALSE" \
+      --changed-action copySave %s
+  )
+  res_code=$?
+  [[ $res_code -eq 1 ]] || [[ $res_code -eq 252 ]] && exit
+
+  IFS='|'
+  read -r WATERFILE POSITION TRANSPARENCY _ COPYCHANGE <<<"$CHOICES"
+  TRANSPARENCY=${TRANSPARENCY%"$decimal_point"*}
+
+  [[ -f "$WATERFILE" ]] && break
+  TEXT_DIALOG='Не выбрано изображение для водяного знака.'
+  notifyDialog
+
+done
+
+[[ "$COPYCHANGE" == "TRUE" ]] && read -r COPYPATH <"$COPYDIR"
+
+# Если не создаем копии
+COPYPATH=${COPYPATH:-$WORKDIR}
+[[ ! -d $COPYPATH ]] && mkdir "$COPYPATH"
+
+POSITION=$(
+  case "$POSITION" in
+    "Top Left")       echo NorthWest    ;;
+    "Top Right")      echo NorthEast    ;;
+    "Bottom Left")    echo SouthWest    ;;
+    "Bottom Right")   echo SouthEast    ;;
+    Top)              echo North        ;;
+    Bottom)           echo South        ;;
+    Left)             echo West         ;;
+    Right)            echo East         ;;
+    Center)           echo Center       ;;
+    Tiled)            echo Tile         ;;
+  esac
+)
+POSITION=$([[ $POSITION == Tile ]] && echo -tile || echo -gravity "$POSITION")
+
+i=0
+j=${#file_list_in[@]}
+
+# экранирование пробелов в имени файла водяного знака
+# WATERFILE=$(echo "$WATERFILE" | sed 's/ /\\ /g')
+WATERFILE=${WATERFILE// /\\ }
+
+for file_name_in in "${file_list_in[@]}"; do
+
+  ((i++))
+
+  # экранирование пробелов в именах обрабатываемых файлов
+  # file_name=$(echo "$file_name" | sed 's/ /\\ /g')
+  file_name_in=${file_name_in// /\\ }
+  file_name_out=${COPYPATH// /\\ }/${file_name_in##*/}
+
+  eval composite -watermark "$TRANSPARENCY" "$POSITION" "$WATERFILE" "$file_name_in" "$file_name_out"
+
+  # вывести отчет
+  echo $((i * 100 / j))
+  echo "#${file_name_in##*/} ==> tagget ==> ${file_name_out}"
+
+done |
+  yad --geometry 450x50+50+50 --title "$TITLE_DIALOG" --button "Закрыть" \
+    --text "Маркировка фотографий" --progress --enable-log "Завершено"
