@@ -1,0 +1,170 @@
+#!/bin/bash
+# -*- mode: sh -*-
+#
+# ОПИСАНИЕ: Наносит дату на фотографии. Обрабатывает только файлы,
+#           без поиска по каталогам.
+#
+# ЗАВИСИТ:  yad 12.3 (GTK+ 3.24.36)
+#           ImageMagick 7.1.0-57 (Beta) Q16-HDRI x86_64 20701
+#           GNU Awk 5.2.1, API 3.2, PMA Avon 8-g1, (GNU MPFR 4.2.0, GNU MP 6.2.1)
+#           grep (GNU grep) 3.8
+#           sed (GNU sed) 4.9
+
+# Переменные по умолчанию
+SCRIPT_NAME='DateMarkPhoto'
+TITLE_DIALOG=${0##*/}
+SCRIPT_DIR=${0%/*}
+ICON_DIR=$(readlink -e "$SCRIPT_DIR"/../../icons)
+ICONS=$ICON_DIR/menu-photos.svg
+WORK_DIR=$(pwd -P)
+
+# Параметры шрифта
+FONT_NAME='Veles-Bold'
+FONT_COLOR='rgb(250,187,92)'
+TRANSPARENCY='100!20..100!1'
+
+# Варианты размещения штампа
+POSITION='Вверху слева!Вверху справа!Внизу слева!^Внизу справа!Вверху!Внизу'
+
+# Общие настройки YAD
+export YAD_OPTIONS="--window-icon $ICONS --name $SCRIPT_NAME"
+
+# Список файлов на входе
+file_list_in=("$@")
+
+# Вывод уведомлений
+notifyDialog() {
+  yad --geometry 100x50-10+50 --no-buttons --undecorated --skip-taskbar \
+    --close-on-unfocus --timeout 5 \
+    --text "\n$TEXT_DIALOG\n" --text-align center --text-width 30
+}
+
+# Удалить из списка все, кроме фотографий
+for file in "${file_list_in[@]}"; do
+  mime_type=$(file --mime-type "$file" | awk -F ": " '{print $2}')
+  [[ "$mime_type" == 'image/jpeg' ]] &&
+    file_list=("${file_list[@]}" "$file")
+done
+
+# Если список пустой, вывести ошибку
+[[ ${#file_list[@]} -eq 0 ]] &&
+  TEXT_DIALOG='Отсутствуют фотографии для обработки.' &&
+  notifyDialog &&
+  exit
+
+# Настройка параметров штампа
+CHOICES=$(
+  yad --geometry 500x200+50+50 --image "$ICONS" --title "$TITLE_DIALOG" \
+    --text '\tНастройка наложения штампа даты' \
+    --mode rgb \
+    --form \
+    --field 'Положение штампа':CB "$POSITION" \
+    --field 'Цвет штампа':CLR "$FONT_COLOR" \
+    --field 'Прозрачность %':NUM "$TRANSPARENCY" \
+    --field 'Сохранить в':CDIR "$WORK_DIR/tagged" \
+    --button 'Отмена':1 --button 'Ок':0
+)
+res_code=$?
+[[ $res_code -eq 1 ]] || [[ $res_code -eq 252 ]] && exit
+
+IFS='|'
+read -r POSITION FONT_COLOR TRANSPARENCY COPY_DIR <<<"$CHOICES"
+
+# Если директории нет - создаем
+[[ ! -d $COPY_DIR ]] && mkdir "$COPY_DIR"
+
+# Сформировать цвет в формате rgba или rgb
+[[ "$TRANSPARENCY" -lt 100 ]] &&
+  TRANSPARENCY=${TRANSPARENCY/#/0.} &&
+  FONT_COLOR=${FONT_COLOR/#rgb/rgba} &&
+  FONT_COLOR=${FONT_COLOR/%)/,$TRANSPARENCY)}
+
+# Определить позицию на изображении
+POSITION=$(
+  case "$POSITION" in
+    "Вверху слева")   echo NorthWest  ;;
+    "Вверху справа")  echo NorthEast  ;;
+    "Внизу слева")    echo SouthWest  ;;
+    "Внизу справа")   echo SouthEast  ;;
+    "Вверху")         echo North      ;;
+    "Внизу")          echo South      ;;
+  esac
+)
+
+j=${#file_list[@]}
+i=0
+
+while [ $i -ne "$j" ]; do
+
+  for file_name_in in "${file_list[@]}"; do
+
+    ((i++))
+
+    # Найти дату в exif
+    for date_photo in "Exif.Photo.DateTimeOriginal" "Exif.Image.DateTime"; do
+      date_photo=$(exiv2 -g "${date_photo}" -Pv "${file_name_in}")
+      # Если дату нашли - прекращаем поиск
+      [[ -n "${date_photo}" ]] && break
+    done
+
+    # Если не нашли, ищем в названии файла
+    if [ -z "$date_photo" ]; then
+      date_photo=$(basename "$file_name_in" ".jpg" | tr ' ' '-' |
+        grep -E -o -m1 '[0-9]{4}([-_:\.\ ]?[0-9]){10}')
+      date_photo=$(echo "$date_photo" | tr -d "\_\-\:\.\ " |
+        sed 's/\([0-9]\{4\}\)\([0-9]\{2\}\)\([0-9]\{2\}\)\([0-9]\{2\}\).*/\1:\2:\3/')
+    fi
+
+    if [ -z "$date_photo" ]; then
+
+      # Если дату не нашли, пропускаем
+      echo "#${file_name_in##*/} - дата не определена. Пропускаем."
+      echo $((i * 100 / j))
+
+    else
+
+      # Формируем дату вида DD.MM.YYYY
+      date_photo=$(echo "$date_photo" | awk -F "[ :]" '{print $3"."$2"."$1}')
+
+      # Определяем размер фотографии
+      F_SIZE=$(magick "$file_name_in" -format '%G' info:-)
+      HEIGHT=${F_SIZE##*x}
+      WIDTH=${F_SIZE%%x*}
+
+      # Определение поправки для положения штампа
+      X=$(
+        case "$POSITION" in
+        NorthWest | SouthWest)  echo "+$((WIDTH / 50))"   ;;
+        *)                      echo "+0"                 ;;
+        esac
+      )
+      Y="+$((HEIGHT / 50))"
+
+      # Формируем имя итогового файла
+      file_name_out=$COPY_DIR/${file_name_in##*/}
+
+      # Поставить дату на снимок (old version)
+      # mogrify -quality 100 -draw "text $X,$Y '$date_photo'" \
+      #   -pointsize "$FONT_SIZE" -gravity "$POSITION" -font "$FONT_NAME" \
+      #   -fill "$FONT_COLOR" "$file_name"
+
+      # Поставить дату на снимок (new version)
+      magick "$file_name_in" -gravity "$POSITION" -font "$FONT_NAME" \
+        -pointsize %[fx:h/40] -fill "$FONT_COLOR" -annotate "$X$Y" \
+        "$date_photo" "$file_name_out"
+
+      # Вывести отчет
+      echo "#${file_name_in##*/} - маркирован датой - $date_photo"
+      echo $((i * 100 / j))
+
+    fi
+
+  done
+
+  # Вывести сообщение о завершении
+  TEXT_DIALOG='Маркировка фотографий завершена'
+  notifyDialog
+
+done |
+  yad --geometry 450x50+50+50 --title "$TITLE_DIALOG" --button "Закрыть" \
+    --text "Маркировка фотографий" --progress --enable-log "Завершено"
