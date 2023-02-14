@@ -1,0 +1,50 @@
+#!/bin/bash
+# -*- mode: sh -*-
+#
+# ОПИСАНИЕ: Оболочка для pkg-info, показывает информацию о пакете.
+#
+# ЗАВИСИТ:  yad 12.3 (GTK+ 3.24.36)
+#           Pacman v6.0.2 - libalpm v13.0.2
+
+SCRIPT_NAME=pkgInfo
+ICONS=package-x-generic
+
+export YAD_OPTIONS="--window-icon $ICONS --name $SCRIPT_NAME"
+
+notifyDialog() {
+  yad --geometry 100x50-10+50 --no-buttons --undecorated --skip-taskbar \
+    --close-on-unfocus --timeout 5 \
+    --text "\n$TEXT_DIALOG\n" --text-align center --text-width 30
+}
+
+if [ ${#@} -ne 1 ]; then
+
+  # Если выбрали более одного файла, сообщить об ошибке
+  TEXT_DIALOG='Выберите только один файл.'
+  notifyDialog
+
+else
+
+  PKG_FILE=$1
+
+  pacman -Qp "$PKG_FILE" # 2>/dev/null
+  res_code=$?
+
+  if [ $res_code = 1 ]; then
+
+    TEXT_DIALOG="Не удалось загрузить пакет '"
+    TEXT_DIALOG+=$PKG_FILE
+    TEXT_DIALOG+="' неверный или поврежденный пакет."
+    notifyDialog
+
+  else
+
+    # Показать информацию о пакете
+    case $XDG_SESSION_TYPE in
+      wayland)  GDK_BACKEND=x11 pkg-info -p "$PKG_FILE"   ;;
+      *)        pkg-info -p "$PKG_FILE"                   ;;
+    esac
+
+  fi
+
+fi
